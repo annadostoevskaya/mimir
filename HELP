@@ -1,0 +1,99 @@
+Emacs TLDR
+
+C means Control.
+M means Alt/Option/Esc.
+RET means Enter.
+SPC means Space.
+
+Most Used
+
+  C-g        cancel current command or prompt
+  C-x C-f    open/create file
+  C-x C-s    save file
+  C-x C-c    quit Emacs
+
+Windows
+
+These are Emacs windows, not macOS windows.
+
+  C-x o      switch to the other window
+  C-x 0      close current window
+  C-x 1      keep only current window
+  C-x 2      split window top/bottom
+  C-x 3      split window left/right
+
+Buffers
+
+Buffers are open files or internal Emacs pages.
+
+  C-x b      switch buffer
+  C-x C-b    list buffers
+  C-x k      close/kill current buffer
+
+Select, Copy, Paste
+
+Start selection:
+
+  C-SPC
+  C-c SPC    fallback if macOS steals C-SPC
+
+Move cursor to select text. The selected region should be highlighted.
+
+  C-w        cut selected text
+  M-w        copy selected text
+  C-y        paste
+  M-y        cycle older clipboard entries after paste
+
+Undo and Redo
+
+With the setup in ~/.emacs.d/init.el:
+
+  C-z        undo
+  C-S-z      redo
+
+Movement
+
+  C-n        next line
+  C-p        previous line
+  C-f        forward char
+  C-b        back char
+
+  M-f        forward word
+  M-b        back word
+
+  C-a        start of line
+  C-e        end of line
+  M-<        start of file
+  M->        end of file
+
+Delete
+
+  DEL        delete previous char
+  C-d        delete next char
+  M-d        delete next word
+  C-k        cut from cursor to end of line
+
+Search
+
+  C-s        search
+
+Type search text. Press C-s again for next match. Press RET to stop.
+
+Compile
+
+With the setup in ~/.emacs.d/init.el:
+
+  C-c c      set compile command
+  F5         rerun compile
+
+Example compile command:
+
+  cc main.c -o main && ./main
+
+Best Habit
+
+When stuck, press:
+
+  C-g
+
+It cancels whatever mode/prompt you are in.
