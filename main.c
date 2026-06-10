@@ -3,7 +3,6 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 
-
 void mimir_write(int fd, const char* s) {
     int len = 0;
 
@@ -20,16 +19,28 @@ void mimir_error(const char* error_message) {
 }
 
 void *mimir_malloc(size_t size) {
-    void *m = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    void *addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
 
-    if (m  == MAP_FAILED) {
+    if (addr == MAP_FAILED) {
         mimir_error("mmap() failed");
         return NULL;
     }
 
-    return m;
+    return addr;
 }
 
+int mimir_free(void *addr, size_t size) {
+    int success = 0;
+
+    success = munmap(addr, size);
+
+    if (success != 0) {
+        mimir_error("munmap() failed");
+        return -1;
+    }
+
+    return 0;
+}
 
 int main(int argc, char **argv) {
     if (argc != 2) {
@@ -66,6 +77,13 @@ int main(int argc, char **argv) {
     close(policy_fd);
 
     mimir_error(policy_content);
+
+    int success = 0;
+    success = mimir_free((void*)policy_content, policy_stat.st_size);
+    if (success != 0) {
+        mimir_error("Failed to free memory for backup policy");
+        return -1;
+    }
 
     return 0;
 }
