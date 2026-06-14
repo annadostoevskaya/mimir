@@ -1,10 +1,11 @@
+#include <stddef.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 
-int mimir_write(int fd, const char* s) {
-    int len = 0;
+ssize_t mimir_write(int fd, const char* s) {
+    ssize_t len = 0;
 
     while (s[len] != '\0')
         len++;
@@ -19,7 +20,7 @@ void mimir_error(const char* error_message) {
 }
 
 void *mimir_malloc(size_t size) {
-    void *addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    void *addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
     if (addr == MAP_FAILED) {
         mimir_error("mmap() failed");
@@ -75,17 +76,17 @@ int mimir_load_policy_content(char *path, char **policy_content, size_t *policy_
     return 0;
 }
 
-struct string_view {
+struct mimir_slice {
     char *start;
     char *end;
 };
 
-void mimir_print_sv(int fd, struct string_view sv) {
+void mimir_print_sv(int fd, struct mimir_slice sv) {
     write(fd, sv.start, sv.end - sv.start);
     write(fd, "\n", 1);
 }
 
-static int mimir_parse_next_line(struct string_view *content, struct string_view *line) {
+static int mimir_parse_next_line(struct mimir_slice *content, struct mimir_slice *line) {
     char *cursor = NULL;
 
     if (content->start >= content->end) {
@@ -120,7 +121,7 @@ static int mimir_parse_is_alpha_numeric(char c) {
         || (c >= '0' && c <= '9');
 }
 
-static struct string_view mimir_parse_trim_line(struct string_view trimmed) {
+static struct mimir_slice mimir_parse_trim_line(struct mimir_slice trimmed) {
     for (char *c = trimmed.start; c < trimmed.end; c += 1) {
         if  (*c == ';') {
             trimmed.end = c;
@@ -139,11 +140,8 @@ static struct string_view mimir_parse_trim_line(struct string_view trimmed) {
     return trimmed;
 }
 
-static int mimir_parse_key_value(struct string_view line, struct string_view *key, struct string_view *value) {
+static int mimir_parse_key_value(struct mimir_slice line, struct mimir_slice *key, struct mimir_slice *value) {
     char *c = NULL;
-
-    key->start = line.start;
-    value->end = line.end;
 
     for (c = line.start; c < line.end; c += 1) {
         if (*c == '=') {
@@ -151,21 +149,29 @@ static int mimir_parse_key_value(struct string_view line, struct string_view *ke
         }
     }
 
-    if (c == line.end - 1) {
-        mimir_error("Failed to find equals symbols");
+    if (c == line.end) {
+        mimir_error("Failed to find equals symbol");
         return -1;
     }
 
-    if (c + 1 == line.end) {
-        mimir_error("Failed to find value");
-        return -1;
-    }
+    key->start = line.start;
+    key->end = c;
 
     value->start = c + 1;
-    key->end = c - 1;
+    value->end = line.end;
 
     *key = mimir_parse_trim_line(*key);
     *value = mimir_parse_trim_line(*value);
+
+    if (key->start == key->end) {
+        mimir_error("Failed to find key");
+        return -1;
+    }
+
+    if (value->start == value->end) {
+        mimir_error("Failed to find value");
+        return -1;
+    }
 
     for (c = key->start; c < key->end; c += 1) {
         if (mimir_parse_is_alpha_numeric(*c) || *c == '-' || *c == '_') {
@@ -177,7 +183,7 @@ static int mimir_parse_key_value(struct string_view line, struct string_view *ke
     }
 
     for (c = value->start; c < value->end; c += 1) {
-        if (mimir_parse_is_alpha_numeric(*c) || *c == '-' || *c == '_' || *c == '/') {
+        if (mimir_parse_is_alpha_numeric(*c) || *c == '-' || *c == '_' || *c == '/' || *c == '.') {
             continue;
         }
 
@@ -188,11 +194,14 @@ static int mimir_parse_key_value(struct string_view line, struct string_view *ke
     return 0;
 }
 
-static int mimir_parse_section(struct string_view line, struct string_view *section) {
-    if (*line.start != '[' || *(line.end - 1) != ']'
-        || line.start + 1 >= line.end
-        || line.end - 1 <= line.start) {
-        mimir_error("Section syntax error"); // TODO(annad): Error handling and logging
+static int mimir_parse_section(struct mimir_slice line, struct mimir_slice *section) {
+    if (line.start >= line.end || line.end - line.start < 3) {
+        mimir_error("Section syntax error");
+        return -1;
+    }
+
+    if (*line.start != '[' || *(line.end - 1) != ']') {
+        mimir_error("Section syntax error");
         return -1;
     }
 
@@ -202,7 +211,7 @@ static int mimir_parse_section(struct string_view line, struct string_view *sect
     for (char *c = line.start; c < line.end; c += 1) {
         if (!mimir_parse_is_alpha_numeric(*c)) {
             mimir_error("Section syntax error, you should use only alpha-numeric symbols");
-            break;
+            return -1;
         }
     }
 
@@ -212,16 +221,16 @@ static int mimir_parse_section(struct string_view line, struct string_view *sect
 }
 
 int mimir_parse_policy_content(char* policy_content, size_t policy_content_size) {
-    struct string_view content = {
+    struct mimir_slice content = {
         .start = policy_content,
         .end = policy_content + policy_content_size
     };
 
-    struct string_view line = {};
-    struct string_view current_section = {};
+    struct mimir_slice line = {};
+    struct mimir_slice current_section = {};
 
     while (mimir_parse_next_line(&content, &line)) {
-        struct string_view trimmed_line = mimir_parse_trim_line(line);
+        struct mimir_slice trimmed_line = mimir_parse_trim_line(line);
 
         mimir_print_sv(STDERR_FILENO, trimmed_line);
 
@@ -241,8 +250,8 @@ int mimir_parse_policy_content(char* policy_content, size_t policy_content_size)
 
         char *c = trimmed_line.start;
         if (mimir_parse_is_alpha_numeric(*c)) {
-            struct string_view key = {};
-            struct string_view value = {};
+            struct mimir_slice key = {};
+            struct mimir_slice value = {};
             int success = mimir_parse_key_value(trimmed_line, &key, &value);
             if (success != 0) {
                 mimir_error("Failed to parse key-value (mimir_parse_key_value)");
@@ -255,6 +264,7 @@ int mimir_parse_policy_content(char* policy_content, size_t policy_content_size)
         }
 
         mimir_error("Unexpected token error");
+        return -1;
     }
 
     return 0;
@@ -289,3 +299,4 @@ int main(int argc, char **argv) {
 
     return 0;
 }
+
