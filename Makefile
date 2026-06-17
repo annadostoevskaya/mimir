@@ -1,2 +1,2 @@
 all:
-	gcc -Wall linux_mimir.c
+	gcc -g -Wall linux_mimir.c

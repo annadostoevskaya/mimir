@@ -1,3 +1,0 @@
-/* mimir_core.c */
-
-
