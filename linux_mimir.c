@@ -3,7 +3,7 @@
  * Email: iwantknow.aboutjt68h43@gmail.com
  * File: linux_mimira.c
  * Created: 2026-06-16 02:46:12
- * Last updated: 2026-06-18 01:26:08
+ * Last updated: 2026-06-19 01:56:02
  * Description:
  * License: $LICENSE
  */
@@ -20,11 +20,6 @@ struct mimir_slice {
     char *start;
     char *end;
 };
-
-void mimir_print_sv(int fd, struct mimir_slice sv) {
-    write(fd, sv.start, sv.end - sv.start);
-    write(fd, "\n", 1);
-}
 
 ssize_t mimir_write(int fd, const char* s) {
     ssize_t len = 0;
@@ -68,51 +63,10 @@ int mimir_free(void *addr, size_t size) {
 /* END: mimir_core.c */
 
 #include "mimir_arena.c"
-#include "mimir_policy_parser.c"
 
 struct mimir_arena_allocator g_mimir_arena = {};
 
-int mimir_load_policy_content(char *path, char **policy_content, size_t *policy_content_size) {
-    int policy_fd = 0;
-    struct stat policy_stat = {};
-
-    policy_fd = open(path, O_RDONLY);
-
-    if (policy_fd < 0) {
-        mimir_error("File not found or access denied");
-        return -1;
-    }
-
-    if (fstat(policy_fd, &policy_stat) < 0) {
-        mimir_error("fstat() failed");
-        close(policy_fd);
-        return -1;
-    }
-
-    *policy_content_size = policy_stat.st_size;
-    *policy_content = (char*)mimir_malloc(*policy_content_size);
-
-    if (*policy_content == NULL) {
-        mimir_error("Failed to allocate memory for backup policy");
-        close(policy_fd);
-        return -1;
-    }
-
-    read(policy_fd, *policy_content, *policy_content_size);
-
-    close(policy_fd);
-
-    return 0;
-}
-
-
-struct mimir_policy_entry {
-    char *section;
-    char *key;
-    char *value;
-};
-
-#define DEFAULT_POLICY_CONTENT_SIZE 5
+/* BEGIN: mimir_slice.c */
 
 static char *mimir_slice_to_cstring(struct mimir_slice src) {
     size_t len = src.end - src.start;
@@ -130,83 +84,100 @@ static char *mimir_slice_to_cstring(struct mimir_slice src) {
     return dest;
 }
 
-int mimir_parse_policy_content(char* policy_content, size_t policy_content_size, struct mimir_policy_entry **policy_entries, size_t *policy_entries_size, size_t *policy_entries_count) {
-    struct mimir_slice content = {
-        .start = policy_content,
-        .end = policy_content + policy_content_size
-    };
+static int mimir_cstring_equals(const char* a, const char *b) {
+    size_t i = 0;
 
-    struct mimir_slice line = {};
-    struct mimir_slice current_section = {};
+    while (a[i] != '\0' && b[i] != '\0') {
+        if (a[i] != b[i]) {
+            return 0;
+        }
 
-    *policy_entries_count = 0;
-    if (*policy_entries_size == 0) {
-        *policy_entries_size = DEFAULT_POLICY_CONTENT_SIZE;
+        i += 1;
     }
 
-    *policy_entries = (struct mimir_policy_entry*)mimir_arena_malloc(&g_mimir_arena, sizeof(struct mimir_policy_entry) * (*policy_entries_size));
+    return a[i] == b[i];
+}
 
-    if (*policy_entries == NULL) {
-        mimir_error("Failed to allocate memory for policy entries");
+static void mimir_print_slice(int fd, struct mimir_slice s) {
+    write(fd, s.start, s.end - s.start);
+    write(fd, "\n", 1);
+}
+
+/* END: mimir_slice.c */
+
+#include "mimir_policy_loader.c"
+#include "mimir_policy_parser.c"
+
+enum mimir_policy_source_type {
+    MIMIR_POLICY_SOURCE_TYPE_NONE = 0,
+    MIMIR_POLICY_SOURCE_TYPE_FILE_SYSTEM,
+
+    MIMIR_POLICY_SOURCE_TYPE_COUNT
+};
+
+enum mimir_policy_repository_type {
+    MIMIR_POLICY_REPOSITORY_TYPE_NONE = 0,
+    MIMIR_POLICY_REPOSITORY_TYPE_FILE_SYSTEM,
+
+    MIMIR_POLICY_REPOSITORY_TYPE_COUNT
+};
+
+enum mimir_policy_driver {
+    MIMIR_POLICY_DRIVER_NONE = 0,
+    MIMIR_POLICY_DRIVER_RSYNC,
+
+    MIMIR_POLICY_DRIVER_COUNT
+};
+
+struct mimir_policy {
+    enum mimir_policy_source_type source_type;
+    enum mimir_policy_repository_type repository_type;
+    enum mimir_policy_driver driver;
+    char *title;
+    char *source_path;
+    char *repository_path;
+};
+
+static int mimir_build_policies(struct mimir_policy_entry *entries, size_t entries_count, size_t sections_count, struct mimir_policy **policies) {
+    *policies = (struct mimir_policy*)mimir_arena_malloc(&g_mimir_arena, sections_count);
+
+    if (*policies == NULL) {
+        mimir_error("Failed to allocate memory for building policies");
         return -1;
     }
 
-    while (mimir_parse_next_line(&content, &line)) {
-        struct mimir_slice trimmed_line = mimir_parse_trim_line(line);
+    for (size_t i = 0; i < sections_count; i += 1) {
+        struct mimir_policy *policy = (*policies) + i;
 
-        if (trimmed_line.start == trimmed_line.end) {
-            continue;
+        policy->title = entries[i * entries_count / sections_count].section;
+
+        for (size_t j = 0; j < entries_count / sections_count; j += 1) {
+            if (mimir_cstring_equals(entries[i * entries_count / sections_count + j].key, "source_type")) {
+                if (mimir_cstring_equals(entries[i * entries_count / sections_count + j].value, "fs")) {
+                    policy->source_type = MIMIR_POLICY_SOURCE_TYPE_FILE_SYSTEM;
+                }
+            }
+
+            if (mimir_cstring_equals(entries[i * entries_count / sections_count + j].key, "source_path")) {
+                policy->source_path = entries[i * entries_count / sections_count + j].value; // TODO: Maybe we should copy this value?
+            }
+
+            if (mimir_cstring_equals(entries[i * entries_count / sections_count + j].key, "repository_type")) {
+                if (mimir_cstring_equals(entries[i * entries_count / sections_count + j].value, "fs")) {
+                    policy->repository_type = MIMIR_POLICY_REPOSITORY_TYPE_FILE_SYSTEM;
+                }
+            }
+
+            if (mimir_cstring_equals(entries[i * entries_count / sections_count + j].key, "repository_path")) {
+                policy->repository_path = entries[i * entries_count / sections_count + j].value;
+            }
+
+            if (mimir_cstring_equals(entries[i * entries_count / sections_count + j].key, "driver")) {
+                if (mimir_cstring_equals(entries[i * entries_count / sections_count + j].value, "rsync")) {
+                    policy->driver = MIMIR_POLICY_DRIVER_RSYNC;
+                }
+            }
         }
-
-        if (*trimmed_line.start == '[') {
-            int success = mimir_parse_section(trimmed_line, &current_section);
-            if (success != 0) {
-                mimir_error("Failed to parse section (mimir_parse_current_section)");
-                return -1;
-            }
-
-            continue;
-        }
-
-        char *c = trimmed_line.start;
-        if (mimir_parse_is_alpha_numeric(*c)) {
-
-            if (current_section.start == current_section.end) {
-                mimir_error("Key-value outside of section");
-                return -1;
-            }
-
-            struct mimir_slice key = {};
-            struct mimir_slice value = {};
-            int success = mimir_parse_key_value(trimmed_line, &key, &value);
-            if (success != 0) {
-                mimir_error("Failed to parse key-value (mimir_parse_key_value)");
-                return -1;
-            }
-
-            if (*policy_entries_count >= *policy_entries_size) {
-                mimir_error("No memory for entries left");
-                return -1;
-            }
-
-            struct mimir_policy_entry *entry = (*policy_entries) + (*policy_entries_count);
-
-            entry->section = mimir_slice_to_cstring(current_section);
-            entry->key = mimir_slice_to_cstring(key);
-            entry->value = mimir_slice_to_cstring(value);
-
-            if (entry->section == NULL || entry->key == NULL || entry->value == NULL) {
-                mimir_error("Failed to allocate policy entry strings");
-                return -1;
-            }
-
-            *policy_entries_count +=  1;
-
-            continue;
-        }
-
-        mimir_error("Unexpected token error");
-        return -1;
     }
 
     return 0;
@@ -214,7 +185,7 @@ int mimir_parse_policy_content(char* policy_content, size_t policy_content_size,
 
 int main(int argc, char **argv) {
 
-    g_mimir_arena = mimir_arena_initialize(4096);
+    g_mimir_arena = mimir_arena_initialize(8192);
 
     if (argc != 2) {
         mimir_error("Usage: ./mimir policy.ini");
@@ -231,21 +202,23 @@ int main(int argc, char **argv) {
     }
 
     struct mimir_policy_entry *policy_entries = NULL;
-    size_t policy_entries_size = 0;
+    size_t policy_entries_size = 10;
     size_t policy_entries_count = 0;
-    success = mimir_parse_policy_content(policy_content, policy_content_size, &policy_entries, &policy_entries_size, &policy_entries_count);
+    size_t policy_sections_count = 0;
+    success = mimir_parse_policy_content(policy_content, policy_content_size, &policy_entries, &policy_entries_size, &policy_entries_count, &policy_sections_count);
     if (success != 0) {
         mimir_error("Failed to parse backup policy");
         return -1;
     }
 
-    for (size_t i = 0; i < policy_entries_count; i += 1) {
-        mimir_error(policy_entries[i].section);
-        mimir_error(policy_entries[i].key);
-        mimir_error(policy_entries[i].value);
+    struct mimir_policy *policies = NULL;
+    success = mimir_build_policies(policy_entries, policy_entries_count, policy_sections_count, &policies);
+    if (success != 0) {
+        mimir_error("Failed to build policies (mimir_build_policies)");
+        return -1;
     }
 
-    success = mimir_free(policy_content, policy_content_size);
+    success = mimir_arena_destroy(&g_mimir_arena);
     if (success != 0) {
         mimir_error("Failed to free memory for backup policy");
         return -1;
