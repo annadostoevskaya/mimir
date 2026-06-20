@@ -3,17 +3,20 @@
  * Email: iwantknow.aboutjt68h43@gmail.com
  * File: mimir_policy_parser.c
  * Created: 2026-06-16 02:48:16
- * Last updated: 2026-06-19 01:19:22
+ * Last updated: 2026-06-21 04:15:51
  * Description:
  * License: $LICENSE
  */
-
-#define DEFAULT_POLICY_CONTENT_SIZE 5
 
 struct mimir_policy_entry {
     char *section;
     char *key;
     char *value;
+};
+
+struct mimir_policy_ini {
+    struct mimir_policy_entry *entries;
+    size_t entries_count, sections_count;
 };
 
 static int mimir_parse_next_line(struct mimir_slice *content, struct mimir_slice *line) {
@@ -139,7 +142,7 @@ static int mimir_parse_section(struct mimir_slice line, struct mimir_slice *sect
     line.end -= 1;
 
     for (char *c = line.start; c < line.end; c += 1) {
-        if (!mimir_parse_is_alpha_numeric(*c)) {
+        if (!(mimir_parse_is_alpha_numeric(*c) || *c == '.' || *c == '-' || *c == '/' || *c == '_')) {
             mimir_error("Section syntax error, you should use only alpha-numeric symbols");
             return -1;
         }
@@ -150,7 +153,7 @@ static int mimir_parse_section(struct mimir_slice line, struct mimir_slice *sect
     return 0;
 }
 
-int mimir_parse_policy_content(char* policy_content, size_t policy_content_size, struct mimir_policy_entry **policy_entries, size_t *policy_entries_size, size_t *policy_entries_count, size_t *policy_sections_count) {
+int mimir_parse_policy_content(char* policy_content, size_t policy_content_size, struct mimir_policy_ini *policy_ini) {
     struct mimir_slice content = {
         .start = policy_content,
         .end = policy_content + policy_content_size
@@ -159,41 +162,27 @@ int mimir_parse_policy_content(char* policy_content, size_t policy_content_size,
     struct mimir_slice line = {};
     struct mimir_slice current_section = {};
 
-    *policy_entries_count = 0;
-    *policy_sections_count = 0;
-    if (*policy_entries_size == 0) {
-        *policy_entries_size = DEFAULT_POLICY_CONTENT_SIZE;
-    }
-
-    *policy_entries = (struct mimir_policy_entry*)mimir_arena_malloc(&g_mimir_arena, sizeof(struct mimir_policy_entry) * (*policy_entries_size));
-
-    if (*policy_entries == NULL) {
-        mimir_error("Failed to allocate memory for policy entries");
-        return -1;
-    }
-
     while (mimir_parse_next_line(&content, &line)) {
-        struct mimir_slice trimmed_line = mimir_parse_trim_line(line);
+       struct mimir_slice trimmed_line = mimir_parse_trim_line(line);
 
         if (trimmed_line.start == trimmed_line.end) {
             continue;
         }
 
-        if (*trimmed_line.start == '[') {
+        char *c = trimmed_line.start;
+        if (*c == '[') {
             int success = mimir_parse_section(trimmed_line, &current_section);
             if (success != 0) {
-                mimir_error("Failed to parse section (mimir_parse_current_section)");
+                mimir_error("Failed to parse section (mimir_parse_section)");
                 return -1;
             }
 
-            *policy_sections_count += 1;
+            policy_ini->sections_count += 1;
 
             continue;
         }
 
-        char *c = trimmed_line.start;
         if (mimir_parse_is_alpha_numeric(*c)) {
-
             if (current_section.start == current_section.end) {
                 mimir_error("Key-value outside of section");
                 return -1;
@@ -207,12 +196,56 @@ int mimir_parse_policy_content(char* policy_content, size_t policy_content_size,
                 return -1;
             }
 
-            if (*policy_entries_count >= *policy_entries_size) {
-                mimir_error("No memory for entries left");
-                return -1;
-            }
+            policy_ini->entries_count += 1;
 
-            struct mimir_policy_entry *entry = (*policy_entries) + (*policy_entries_count);
+            continue;
+        }
+
+        mimir_error("Unexpected token error");
+        return -1;
+    }
+
+    content = (struct mimir_slice){
+        .start = policy_content,
+        .end = policy_content + policy_content_size,
+    };
+
+    line = (struct mimir_slice){0};
+    current_section = (struct mimir_slice){0};
+
+    if (policy_ini->entries_count == 0) {
+        mimir_error("Entries not found in policy file");
+        return -1;
+    }
+
+    policy_ini->entries = (struct mimir_policy_entry*)mimir_arena_malloc(&g_mimir_arena, sizeof(*policy_ini->entries) * policy_ini->entries_count);
+
+    if (policy_ini->entries == NULL) {
+        mimir_error("Failed to allocate memory for policy entries");
+        return -1;
+    }
+
+    size_t entries_iterator = 0;
+
+    while (mimir_parse_next_line(&content, &line)) {
+        struct mimir_slice trimmed_line = mimir_parse_trim_line(line);
+
+        if (trimmed_line.start == trimmed_line.end) {
+            continue;
+        }
+
+        if (*trimmed_line.start == '[') {
+            mimir_parse_section(trimmed_line, &current_section);
+            continue;
+        }
+
+        char *c = trimmed_line.start;
+        if (mimir_parse_is_alpha_numeric(*c)) {
+            struct mimir_slice key = {};
+            struct mimir_slice value = {};
+            mimir_parse_key_value(trimmed_line, &key, &value);
+
+            struct mimir_policy_entry *entry = policy_ini->entries + entries_iterator;
 
             entry->section = mimir_slice_to_cstring(current_section);
             entry->key = mimir_slice_to_cstring(key);
@@ -223,13 +256,9 @@ int mimir_parse_policy_content(char* policy_content, size_t policy_content_size,
                 return -1;
             }
 
-            *policy_entries_count +=  1;
-
+            entries_iterator += 1;
             continue;
         }
-
-        mimir_error("Unexpected token error");
-        return -1;
     }
 
     return 0;

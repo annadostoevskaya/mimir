@@ -3,7 +3,7 @@
  * Email: iwantknow.aboutjt68h43@gmail.com
  * File: linux_mimira.c
  * Created: 2026-06-16 02:46:12
- * Last updated: 2026-06-19 01:56:02
+ * Last updated: 2026-06-21 03:52:23
  * Description:
  * License: $LICENSE
  */
@@ -137,8 +137,8 @@ struct mimir_policy {
     char *source_path;
     char *repository_path;
 };
-
-static int mimir_build_policies(struct mimir_policy_entry *entries, size_t entries_count, size_t sections_count, struct mimir_policy **policies) {
+/*
+static int mimir_build_policies(struct mimir_policy_ini *policy_ini, struct mimir_policy **policies) {
     *policies = (struct mimir_policy*)mimir_arena_malloc(&g_mimir_arena, sections_count);
 
     if (*policies == NULL) {
@@ -182,7 +182,7 @@ static int mimir_build_policies(struct mimir_policy_entry *entries, size_t entri
 
     return 0;
 }
-
+*/
 int main(int argc, char **argv) {
 
     g_mimir_arena = mimir_arena_initialize(8192);
@@ -201,18 +201,15 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    struct mimir_policy_entry *policy_entries = NULL;
-    size_t policy_entries_size = 10;
-    size_t policy_entries_count = 0;
-    size_t policy_sections_count = 0;
-    success = mimir_parse_policy_content(policy_content, policy_content_size, &policy_entries, &policy_entries_size, &policy_entries_count, &policy_sections_count);
+    struct mimir_policy_ini ini = { 0 };
+    success = mimir_parse_policy_content(policy_content, policy_content_size, &ini);
     if (success != 0) {
         mimir_error("Failed to parse backup policy");
         return -1;
     }
 
     struct mimir_policy *policies = NULL;
-    success = mimir_build_policies(policy_entries, policy_entries_count, policy_sections_count, &policies);
+    // success = mimir_build_policies(ini, &policies);
     if (success != 0) {
         mimir_error("Failed to build policies (mimir_build_policies)");
         return -1;
