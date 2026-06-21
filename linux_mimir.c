@@ -3,7 +3,7 @@
  * Email: iwantknow.aboutjt68h43@gmail.com
  * File: linux_mimira.c
  * Created: 2026-06-16 02:46:12
- * Last updated: 2026-06-21 03:52:23
+ * Last updated: 2026-06-21 21:44:21
  * Description:
  * License: $LICENSE
  */
@@ -130,6 +130,8 @@ enum mimir_policy_driver {
 };
 
 struct mimir_policy {
+    // TODO: vtbl
+
     enum mimir_policy_source_type source_type;
     enum mimir_policy_repository_type repository_type;
     enum mimir_policy_driver driver;
@@ -137,7 +139,7 @@ struct mimir_policy {
     char *source_path;
     char *repository_path;
 };
-/*
+
 static int mimir_build_policies(struct mimir_policy_ini *policy_ini, struct mimir_policy **policies) {
     *policies = (struct mimir_policy*)mimir_arena_malloc(&g_mimir_arena, sections_count);
 
@@ -182,9 +184,10 @@ static int mimir_build_policies(struct mimir_policy_ini *policy_ini, struct mimi
 
     return 0;
 }
-*/
-int main(int argc, char **argv) {
 
+struct mimir_hm {};
+
+int main(int argc, char **argv) {
     g_mimir_arena = mimir_arena_initialize(8192);
 
     if (argc != 2) {
@@ -209,7 +212,7 @@ int main(int argc, char **argv) {
     }
 
     struct mimir_policy *policies = NULL;
-    // success = mimir_build_policies(ini, &policies);
+    success = mimir_build_policies(ini, &policies);
     if (success != 0) {
         mimir_error("Failed to build policies (mimir_build_policies)");
         return -1;

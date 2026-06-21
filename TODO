@@ -1,0 +1,681 @@
+Коротко идеи такие:
+
+## 1. Главная секция — это манифест политики
+
+```ini
+[attachments]
+source = fs
+repository = fs
+driver = rsync
+```
+
+Она не хранит все настройки подряд. Она только говорит: какие компоненты используются.
+
+---
+
+## 2. Настройки компонентов — в отдельных секциях
+
+Формат:
+
+```text
+<policy>.<component>.<implementation>
+```
+
+Пример:
+
+```ini
+[attachments.source.fs]
+path = /tmp/attachments
+
+[attachments.repository.fs]
+path = /tmp/attachmes
+
+[attachments.driver.rsync]
+archive = true
+delete = true
+```
+
+Лучше так, чем `[attachments.fs]`, потому что понятно, что это именно `source.fs`, а не `repository.fs`.
+
+---
+
+## 3. `source`, `repository`, `driver` — отдельные сущности
+
+Примерно:
+
+```c
+struct mimir_policy {
+    char *title;
+
+    struct mimir_source source;
+    struct mimir_repository repository;
+    struct mimir_driver driver;
+};
+```
+
+---
+
+## 4. У каждой сущности может быть vtable
+
+```c
+struct mimir_source {
+    enum mimir_source_type type;
+    void *config;
+    const struct mimir_source_vtable *vtable;
+};
+
+struct mimir_driver {
+    enum mimir_driver_type type;
+    void *config;
+    const struct mimir_driver_vtable *vtable;
+};
+```
+
+То есть вместо огромных `switch`:
+
+```c
+policy->source.vtable->prepare(...);
+policy->driver.vtable->backup(...);
+```
+
+---
+
+## 5. Driver не должен работать напрямую с source
+
+Плохая модель:
+
+```text
+source -> driver -> repository
+```
+
+Лучше:
+
+```text
+source -> artifact -> driver -> repository
+```
+
+Потому что `source` может быть чем угодно: fs, postgres, lvm snapshot, openstack volume.
+
+А driver должен получать уже подготовленный объект.
+
+---
+
+## 6. Ввести `mimir_artifact`
+
+```c
+enum mimir_artifact_type {
+    MIMIR_ARTIFACT_NONE = 0,
+    MIMIR_ARTIFACT_FS_PATH,
+    MIMIR_ARTIFACT_STREAM,
+    MIMIR_ARTIFACT_BLOCK_DEVICE,
+};
+```
+
+Пример:
+
+```c
+struct mimir_artifact {
+    enum mimir_artifact_type type;
+
+    union {
+        struct {
+            char *path;
+        } fs;
+
+        struct {
+            int fd;
+        } stream;
+
+        struct {
+            char *path;
+        } block_device;
+    };
+};
+```
+
+---
+
+## 7. Source API
+
+```c
+struct mimir_source_vtable {
+    int (*validate)(void *config);
+    int (*prepare)(void *config, struct mimir_artifact *artifact);
+    int (*cleanup)(void *config, struct mimir_artifact *artifact);
+};
+```
+
+Source делает подготовку и возвращает artifact.
+
+Примеры:
+
+```text
+fs source       -> artifact FS_PATH
+postgres source -> artifact FS_PATH или STREAM
+lvm snapshot    -> artifact FS_PATH
+openstack snap  -> artifact FS_PATH
+```
+
+---
+
+## 8. Driver API
+
+```c
+struct mimir_driver_vtable {
+    int (*validate)(void *config);
+
+    int (*supports_artifact)(enum mimir_artifact_type type);
+
+    int (*backup)(
+        void *config,
+        struct mimir_artifact *artifact,
+        struct mimir_repository *repository
+    );
+};
+```
+
+Driver бэкапит не source, а artifact.
+
+---
+
+## 9. `pg_dump` — это хороший пример
+
+Логически:
+
+```text
+postgres source
+```
+
+Физически:
+
+```text
+pg_dump -> file или stream
+```
+
+То есть:
+
+```text
+postgres -> pg_dump -> artifact -> restic -> repository
+```
+
+Например:
+
+```text
+postgres source prepare:
+    pg_dump -> /run/mimir/work/database.dump
+
+artifact:
+    FS_PATH /run/mimir/work/database.dump
+
+driver:
+    restic backup /run/mimir/work/database.dump
+```
+
+---
+
+## 10. Snapshot можно встроить как особый source
+
+На первом этапе не надо делать отдельный top-level `snapshot`.
+
+Можно так:
+
+```ini
+[database]
+source = lvm-snapshot
+repository = s3
+driver = restic
+
+[database.source.lvm-snapshot]
+volume = /dev/vg0/postgres
+mount_path = /run/mimir/snapshots/postgres
+readonly = true
+```
+
+Тогда:
+
+```text
+lvm-snapshot source prepare:
+    create snapshot
+    mount readonly
+    return FS_PATH artifact
+
+cleanup:
+    umount
+    remove snapshot
+```
+
+---
+
+## 11. Потом snapshot можно вынести отдельно
+
+Будущий вариант:
+
+```ini
+[database]
+source = fs
+snapshot = lvm
+repository = s3
+driver = restic
+```
+
+Но сейчас это может быть лишнее усложнение.
+
+---
+
+## 12. Главное правило
+
+```text
+source != то, что driver бэкапит
+```
+
+Driver бэкапит **prepared artifact**.
+
+Это самая важная идея. Она спасает архитектуру от боли с `pg_dump`, snapshots, block devices, streams и временными dump-файлами.
+
+--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+
+Да, для **логического бэкапа БД** ты прав: если у PostgreSQL есть адрес/порт, то нормальный путь — ходить в сам PostgreSQL:
+
+```text
+source = postgres
+capture = pg-dump / pg-basebackup
+```
+
+А не:
+
+```text
+source = postgres
+capture = lvm-snapshot
+```
+
+Потому что БД — это не просто файлы. У неё есть WAL, транзакции, буферы, consistency point, роли, схемы, extensions, permissions. Через порт она сама умеет отдать консистентный backup.
+
+---
+
+## Для PostgreSQL нормальные варианты такие
+
+### 1. `pg_dump`
+
+Для небольших/средних БД, когда нужен переносимый логический dump:
+
+```ini
+[database]
+source = postgres
+capture = pg-dump
+driver = restic
+repository = s3
+
+[database.source.postgres]
+host = 127.0.0.1
+port = 5432
+database = app
+user = mimir
+
+[database.capture.pg-dump]
+format = custom
+output = file
+```
+
+Pipeline:
+
+```text
+postgres over TCP -> pg_dump -> dump file/stream -> restic -> s3
+```
+
+---
+
+### 2. `pg_basebackup`
+
+Для физического PostgreSQL backup-а:
+
+```ini
+[database]
+source = postgres
+capture = pg-basebackup
+driver = restic
+repository = s3
+```
+
+Pipeline:
+
+```text
+postgres replication protocol -> base backup -> artifact FS_PATH -> restic -> s3
+```
+
+Это уже ближе к “настоящему” disaster recovery.
+
+---
+
+### 3. WAL archiving
+
+Для point-in-time recovery:
+
+```ini
+[database]
+source = postgres
+capture = wal-archive
+repository = s3
+driver = native
+```
+
+Или это вообще отдельная политика.
+
+---
+
+## Snapshot БД — не всегда хуйня, но это отдельный класс
+
+Snapshot диска с PostgreSQL имеет смысл, если ты делаешь **инфраструктурный physical backup**, например:
+
+```text
+цель: быстро снять весь volume
+цель: backup VM целиком
+цель: огромная база, pg_dump слишком долгий
+цель: минимальное окно нагрузки
+цель: снапшоты делает cloud/storage слой
+```
+
+Но тогда надо не просто тупо снять snapshot. Надо обеспечить consistency:
+
+```text
+CHECKPOINT
+pg_start_backup / pg_backup_start
+snapshot volume
+pg_stop_backup / pg_backup_stop
+WAL included/archived
+```
+
+Иначе можно получить “файлы PostgreSQL”, которые потом не поднимутся или поднимутся не туда.
+
+---
+
+## Поэтому модель `source/capture` всё равно полезна
+
+Просто для БД чаще будет так:
+
+```text
+source = postgres
+capture = pg-dump
+```
+
+или:
+
+```text
+source = postgres
+capture = pg-basebackup
+```
+
+А не:
+
+```text
+source = postgres
+capture = lvm-snapshot
+```
+
+Но сама абстракция остаётся хорошей.
+
+Потому что `source` отвечает на вопрос:
+
+```text
+что бэкапим?
+```
+
+А `capture` отвечает:
+
+```text
+каким способом получаем backup artifact?
+```
+
+---
+
+## Я бы сделал так
+
+Для v1:
+
+```text
+source = fs
+capture = direct
+
+source = postgres
+capture = pg-dump
+
+repository = fs
+repository = s3
+
+driver = rsync
+driver = restic
+```
+
+То есть первый рабочий набор:
+
+```ini
+[attachments]
+source = fs
+capture = direct
+repository = fs
+driver = rsync
+
+[attachments.source.fs]
+path = /tmp/attachments
+
+[attachments.capture.direct]
+
+[attachments.repository.fs]
+path = /tmp/attachmes
+
+[attachments.driver.rsync]
+archive = true
+delete = true
+```
+
+И для БД:
+
+```ini
+[database]
+source = postgres
+capture = pg-dump
+repository = fs
+driver = restic
+
+[database.source.postgres]
+host = 127.0.0.1
+port = 5432
+database = app
+user = mimir
+
+[database.capture.pg-dump]
+format = custom
+output = file
+workdir = /run/mimir/work
+
+[database.repository.fs]
+path = /backup/database
+```
+
+---
+
+## Где тогда snapshot?
+
+Snapshot оставить на потом для инфраструктурных source-ов:
+
+```text
+source = volume
+capture = lvm-snapshot
+
+source = vm
+capture = openstack-snapshot
+
+source = zfs-dataset
+capture = zfs-snapshot
+```
+
+Например:
+
+```ini
+[vm-disk]
+source = volume
+capture = lvm-snapshot
+repository = s3
+driver = restic
+```
+
+А не обязательно для PostgreSQL.
+
+---
+
+## Итоговая формула
+
+Да, мысль правильная:
+
+```text
+БД лучше бэкапить через её native protocol.
+Файлы лучше бэкапить как FS_PATH.
+Диски/VM лучше бэкапить через snapshot.
+```
+
+Поэтому:
+
+```text
+postgres -> pg_dump / pg_basebackup
+fs       -> direct
+volume   -> lvm-snapshot / cloud-snapshot
+vm       -> hypervisor-snapshot
+```
+
+И вот теперь `source/capture/artifact/driver/repository` становится не усложнением, а нормальной классификацией.
+
+--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+
+Да. **`artifact` — это скрытый runtime-слой**, не часть пользовательского конфига.
+
+Пользователь пишет:
+
+```ini
+[database]
+source = postgres
+capture = pg-dump
+driver = restic
+repository = s3
+```
+
+А внутри Mimir во время выполнения получается:
+
+```text
+source + capture -> artifact -> driver -> repository
+```
+
+То есть `artifact` — это не “что юзер настраивает”, а **что Mimir получил после capture**.
+
+Примеры:
+
+```text
+source=fs
+capture=direct
+artifact=FS_PATH /home/anna
+
+source=postgres
+capture=pg-dump
+artifact=STREAM fd
+или
+artifact=FS_PATH /run/mimir/work/db.dump
+
+source=volume
+capture=lvm-snapshot
+artifact=FS_PATH /run/mimir/mounts/db-volume
+
+source=volume
+capture=raw-block
+artifact=BLOCK_DEVICE /dev/mapper/snapshot-x
+```
+
+То есть config-level модель:
+
+```text
+source / capture / driver / repository
+```
+
+Runtime-level модель:
+
+```text
+source -> capture -> artifact -> driver -> repository
+```
+
+---
+
+`artifact` нужен, чтобы driver не знал, откуда пришли данные.
+
+`rsync` не должен знать, что это был LVM snapshot. Ему достаточно:
+
+```text
+artifact.type = FS_PATH
+artifact.path = /run/mimir/mounts/db-volume
+```
+
+`restic` не должен знать, что это был `pg_dump`. Ему достаточно:
+
+```text
+artifact.type = STREAM
+artifact.fd = 7
+artifact.name = database.dump
+```
+
+или:
+
+```text
+artifact.type = FS_PATH
+artifact.path = /run/mimir/work/database.dump
+```
+
+---
+
+Я бы прям так и держал в голове:
+
+```text
+source     = логический объект
+capture    = способ получить данные
+artifact   = физический результат capture
+driver     = чем сохранить artifact
+repository = куда сохранить
+```
+
+И да, `artifact` почти наверняка не нужен в INI. Он должен быть `struct` внутри программы:
+
+```c
+enum mimir_artifact_type {
+    MIMIR_ARTIFACT_NONE = 0,
+    MIMIR_ARTIFACT_FS_PATH,
+    MIMIR_ARTIFACT_STREAM,
+    MIMIR_ARTIFACT_BLOCK_DEVICE,
+};
+
+struct mimir_artifact {
+    enum mimir_artifact_type type;
+
+    char *name; /* logical name for repository/driver */
+
+    union {
+        struct {
+            char *path;
+        } fs_path;
+
+        struct {
+            int fd;
+        } stream;
+
+        struct {
+            char *path;
+        } block_device;
+    };
+};
+```
+
+Самое важное: **driver принимает artifact, а не source**.
+
+```c
+driver->vtable->backup(
+    driver->config,
+    &artifact,
+    &repository
+);
+```
+
+Вот это развяжет всё. `pg_dump`, snapshot, direct fs, stream — всё сведётся к одному контракту.
