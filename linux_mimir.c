@@ -3,12 +3,14 @@
  * Email: iwantknow.aboutjt68h43@gmail.com
  * File: linux_mimira.c
  * Created: 2026-06-16 02:46:12
- * Last updated: 2026-06-21 21:44:21
+ * Last updated: 2026-06-23 09:24:06
  * Description:
  * License: $LICENSE
  */
 
 #include <stddef.h>
+#include <string.h>
+
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -70,32 +72,16 @@ struct mimir_arena_allocator g_mimir_arena = {};
 
 static char *mimir_slice_to_cstring(struct mimir_slice src) {
     size_t len = src.end - src.start;
-    char *dest = mimir_arena_malloc(&g_mimir_arena, len + 1);
 
+    char *dest = mimir_arena_malloc(&g_mimir_arena, len + 1);
     if (dest == NULL) {
         return NULL;
     }
 
-    for (size_t i = 0; i < len; i += 1) {
-        dest[i] = src.start[i];
-    }
-
+    memcpy(dest, src.start, len);
     dest[len] = '\0';
+
     return dest;
-}
-
-static int mimir_cstring_equals(const char* a, const char *b) {
-    size_t i = 0;
-
-    while (a[i] != '\0' && b[i] != '\0') {
-        if (a[i] != b[i]) {
-            return 0;
-        }
-
-        i += 1;
-    }
-
-    return a[i] == b[i];
 }
 
 static void mimir_print_slice(int fd, struct mimir_slice s) {
@@ -122,70 +108,71 @@ enum mimir_policy_repository_type {
     MIMIR_POLICY_REPOSITORY_TYPE_COUNT
 };
 
-enum mimir_policy_driver {
+enum mimir_policy_driver_type {
     MIMIR_POLICY_DRIVER_NONE = 0,
     MIMIR_POLICY_DRIVER_RSYNC,
 
     MIMIR_POLICY_DRIVER_COUNT
 };
 
-struct mimir_policy {
-    // TODO: vtbl
+enum mimir_policy_artifact_type {
+    MIMIR_ARTIFACT_NONE = 0,
+    MIMIR_ARTIFACT_FS_PATH ,
+    MIMIR_ARTIFACT_STREAM,
+    MIMIR_ARTIFACT_BLOCK_DEVICE,
 
-    enum mimir_policy_source_type source_type;
-    enum mimir_policy_repository_type repository_type;
-    enum mimir_policy_driver driver;
+    MIMIR_ARTIFACT_COUNT
+};
+
+struct mimir_policy_artifact {
+    enum mimir_policy_artifact_type type;
+
+    union {
+        struct {
+            char *path;
+        } fs;
+
+        struct {
+            int fd;
+        } stream;
+
+        struct {
+            char *path;
+        } block_device;
+    };
+};
+
+struct mimir_policy_source {
+    enum mimir_policy_source_type type;
+    void *config;
+    const struct mimir_policy_source_vtable *vtable;
+};
+
+struct mimir_policy {
     char *title;
-    char *source_path;
-    char *repository_path;
+
+    struct mimir_policy_source source;
+    // struct mimir_policy_capture capture;
+    struct mimir_policy_repo repo;
+    struct mimir_policy_driver driver;
 };
 
 static int mimir_build_policies(struct mimir_policy_ini *policy_ini, struct mimir_policy **policies) {
-    *policies = (struct mimir_policy*)mimir_arena_malloc(&g_mimir_arena, sections_count);
 
-    if (*policies == NULL) {
-        mimir_error("Failed to allocate memory for building policies");
-        return -1;
-    }
+    // BUILD POLICY
+    // 1. Create domain temporary structure (hash-map)
+    // 1.1. O(1) access to every hm[section][key] = value
+    // 1.2. policy[title][section][source][fs].path ?
+    // 2. Parse this to mimir_policy
 
-    for (size_t i = 0; i < sections_count; i += 1) {
-        struct mimir_policy *policy = (*policies) + i;
-
-        policy->title = entries[i * entries_count / sections_count].section;
-
-        for (size_t j = 0; j < entries_count / sections_count; j += 1) {
-            if (mimir_cstring_equals(entries[i * entries_count / sections_count + j].key, "source_type")) {
-                if (mimir_cstring_equals(entries[i * entries_count / sections_count + j].value, "fs")) {
-                    policy->source_type = MIMIR_POLICY_SOURCE_TYPE_FILE_SYSTEM;
-                }
-            }
-
-            if (mimir_cstring_equals(entries[i * entries_count / sections_count + j].key, "source_path")) {
-                policy->source_path = entries[i * entries_count / sections_count + j].value; // TODO: Maybe we should copy this value?
-            }
-
-            if (mimir_cstring_equals(entries[i * entries_count / sections_count + j].key, "repository_type")) {
-                if (mimir_cstring_equals(entries[i * entries_count / sections_count + j].value, "fs")) {
-                    policy->repository_type = MIMIR_POLICY_REPOSITORY_TYPE_FILE_SYSTEM;
-                }
-            }
-
-            if (mimir_cstring_equals(entries[i * entries_count / sections_count + j].key, "repository_path")) {
-                policy->repository_path = entries[i * entries_count / sections_count + j].value;
-            }
-
-            if (mimir_cstring_equals(entries[i * entries_count / sections_count + j].key, "driver")) {
-                if (mimir_cstring_equals(entries[i * entries_count / sections_count + j].value, "rsync")) {
-                    policy->driver = MIMIR_POLICY_DRIVER_RSYNC;
-                }
-            }
-        }
-    }
+    // 1. count policy manifest
+    // 2. alloc memory
+    // 3. check is section, check is already build? if no: goto 4
+    // 4. build one policy
+    // 5.
 
     return 0;
 }
-
-struct mimir_hm {};
 
 int main(int argc, char **argv) {
     g_mimir_arena = mimir_arena_initialize(8192);

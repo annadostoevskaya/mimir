@@ -679,3 +679,772 @@ driver->vtable->backup(
 ```
 
 Вот это развяжет всё. `pg_dump`, snapshot, direct fs, stream — всё сведётся к одному контракту.
+
+--- --- --- --- --- --- --- --- --- --- --- --- ---
+
+Да. Теперь тебе надо **не сразу build policies**, а сначала ввести понятный контракт между INI и domain-моделью.
+
+Я бы сейчас писал не hash map. Пока рано. Сначала сделай простой builder через линейный поиск. Потом заменишь lookup на hash map, не меняя архитектуру.
+
+---
+
+## 1. Конфиг лучше привести к такому виду
+
+```ini
+[attachments]
+source = fs
+capture = direct
+repository = fs
+driver = rsync
+
+[attachments.source.fs]
+path = /tmp/attachments
+
+[attachments.capture.direct]
+
+[attachments.repository.fs]
+path = /tmp/attachmes
+
+[attachments.driver.rsync]
+archive = true
+delete = true
+```
+
+То есть главная секция — манифест.
+
+Подсекции:
+
+```text
+<policy>.<component>.<implementation>
+```
+
+Например:
+
+```text
+attachments.source.fs
+attachments.repository.fs
+attachments.driver.rsync
+```
+
+---
+
+## 2. Не `repo_type`, а просто `repository`
+
+В структуре можно оставить enum как хочешь, но в конфиге лучше:
+
+```ini
+repository = fs
+```
+
+а не:
+
+```ini
+repository_type = fs
+```
+
+Потому что `source`, `capture`, `driver`, `repository` — это все одинаково компоненты политики.
+
+---
+
+## 3. Сейчас тебе нужна такая модель
+
+```c
+struct mimir_policy_repository {
+    enum mimir_policy_repository_type type;
+    void *config;
+    const struct mimir_policy_repository_vtable *vtable;
+};
+
+struct mimir_policy_driver {
+    enum mimir_policy_driver_type type;
+    void *config;
+    const struct mimir_policy_driver_vtable *vtable;
+};
+
+struct mimir_policy_capture {
+    enum mimir_policy_capture_type type;
+    void *config;
+    const struct mimir_policy_capture_vtable *vtable;
+};
+
+struct mimir_policy {
+    char *title;
+
+    struct mimir_policy_source source;
+    struct mimir_policy_capture capture;
+    struct mimir_policy_repository repository;
+    struct mimir_policy_driver driver;
+};
+```
+
+Я бы не называл поле `repo`, лучше `repository`. В коде чуть длиннее, но семантически чище.
+
+---
+
+## 4. Artifact не должен быть частью policy
+
+Вот это хорошо:
+
+```c
+struct mimir_policy_artifact {
+    enum mimir_policy_artifact_type type;
+
+    union {
+        struct {
+            char *path;
+        } fs;
+
+        struct {
+            int fd;
+        } stream;
+
+        struct {
+            char *path;
+        } block_device;
+    };
+};
+```
+
+Но `artifact` не должен лежать внутри `struct mimir_policy`.
+
+Он появляется только во время исполнения:
+
+```c
+struct mimir_policy_artifact artifact = {0};
+
+policy->capture.vtable->prepare(
+    policy->capture.config,
+    &policy->source,
+    &artifact
+);
+
+policy->driver.vtable->backup(
+    policy->driver.config,
+    &artifact,
+    &policy->repository
+);
+```
+
+То есть:
+
+```text
+policy = static config
+artifact = runtime result
+```
+
+---
+
+## 5. Builder должен выглядеть примерно так
+
+Главная функция:
+
+```c
+static int mimir_build_policies(
+    struct mimir_policy_ini *ini,
+    struct mimir_policy **policies,
+    size_t *policies_count
+) {
+    int success = mimir_count_policy_manifests(ini, policies_count);
+    if (success != 0) {
+        return -1;
+    }
+
+    *policies = mimir_arena_malloc(
+        &g_mimir_arena,
+        sizeof(**policies) * (*policies_count)
+    );
+
+    if (*policies == NULL) {
+        mimir_error("Failed to allocate policies");
+        return -1;
+    }
+
+    size_t policy_index = 0;
+
+    for (size_t i = 0; i < ini->entries_count; i += 1) {
+        char *section = ini->entries[i].section;
+
+        if (!mimir_ini_section_is_manifest(section)) {
+            continue;
+        }
+
+        if (mimir_policy_already_built(*policies, policy_index, section)) {
+            continue;
+        }
+
+        struct mimir_policy *policy = (*policies) + policy_index;
+        policy->title = section;
+
+        success = mimir_build_single_policy(ini, section, policy);
+        if (success != 0) {
+            mimir_error("Failed to build policy");
+            return -1;
+        }
+
+        policy_index += 1;
+    }
+
+    return 0;
+}
+```
+
+---
+
+## 6. Как понять, что секция — manifest
+
+Manifest — это секция без точки.
+
+```c
+static int mimir_ini_section_is_manifest(char *section) {
+    for (char *c = section; *c != '\0'; c += 1) {
+        if (*c == '.') {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+```
+
+То есть:
+
+```text
+attachments                 yes
+attachments.source.fs       no
+attachments.repository.fs   no
+attachments.driver.rsync    no
+```
+
+---
+
+## 7. Сборка одной policy
+
+```c
+static int mimir_build_single_policy(
+    struct mimir_policy_ini *ini,
+    char *title,
+    struct mimir_policy *policy
+) {
+    char *source_name = NULL;
+    char *capture_name = NULL;
+    char *repository_name = NULL;
+    char *driver_name = NULL;
+
+    int success = mimir_read_policy_manifest(
+        ini,
+        title,
+        &source_name,
+        &capture_name,
+        &repository_name,
+        &driver_name
+    );
+
+    if (success != 0) {
+        return -1;
+    }
+
+    char *source_section = mimir_join3(title, "source", source_name);
+    char *capture_section = mimir_join3(title, "capture", capture_name);
+    char *repository_section = mimir_join3(title, "repository", repository_name);
+    char *driver_section = mimir_join3(title, "driver", driver_name);
+
+    if (
+        source_section == NULL ||
+        capture_section == NULL ||
+        repository_section == NULL ||
+        driver_section == NULL
+    ) {
+        mimir_error("Failed to allocate component section names");
+        return -1;
+    }
+
+    success = mimir_build_source(ini, source_name, source_section, &policy->source);
+    if (success != 0) {
+        return -1;
+    }
+
+    success = mimir_build_capture(ini, capture_name, capture_section, &policy->capture);
+    if (success != 0) {
+        return -1;
+    }
+
+    success = mimir_build_repository(ini, repository_name, repository_section, &policy->repository);
+    if (success != 0) {
+        return -1;
+    }
+
+    success = mimir_build_driver(ini, driver_name, driver_section, &policy->driver);
+    if (success != 0) {
+        return -1;
+    }
+
+    return mimir_validate_policy(policy);
+}
+```
+
+---
+
+## 8. Manifest reader
+
+Он читает только секцию `[attachments]`.
+
+```c
+static int mimir_read_policy_manifest(
+    struct mimir_policy_ini *ini,
+    char *section,
+    char **source,
+    char **capture,
+    char **repository,
+    char **driver
+) {
+    for (size_t i = 0; i < ini->entries_count; i += 1) {
+        struct mimir_policy_entry *entry = ini->entries + i;
+
+        if (!mimir_cstring_equals(entry->section, section)) {
+            continue;
+        }
+
+        if (mimir_cstring_equals(entry->key, "source")) {
+            *source = entry->value;
+            continue;
+        }
+
+        if (mimir_cstring_equals(entry->key, "capture")) {
+            *capture = entry->value;
+            continue;
+        }
+
+        if (mimir_cstring_equals(entry->key, "repository")) {
+            *repository = entry->value;
+            continue;
+        }
+
+        if (mimir_cstring_equals(entry->key, "driver")) {
+            *driver = entry->value;
+            continue;
+        }
+
+        mimir_error("Unknown manifest key");
+        return -1;
+    }
+
+    if (*source == NULL) {
+        mimir_error("Policy source is missing");
+        return -1;
+    }
+
+    if (*capture == NULL) {
+        mimir_error("Policy capture is missing");
+        return -1;
+    }
+
+    if (*repository == NULL) {
+        mimir_error("Policy repository is missing");
+        return -1;
+    }
+
+    if (*driver == NULL) {
+        mimir_error("Policy driver is missing");
+        return -1;
+    }
+
+    return 0;
+}
+```
+
+---
+
+## 9. `mimir_join3`
+
+Для секций вида:
+
+```text
+attachments.source.fs
+```
+
+```c
+static char *mimir_join3(char *a, char *b, char *c) {
+    size_t a_len = mimir_cstring_length(a);
+    size_t b_len = mimir_cstring_length(b);
+    size_t c_len = mimir_cstring_length(c);
+
+    size_t total = a_len + 1 + b_len + 1 + c_len + 1;
+
+    char *result = mimir_arena_malloc(&g_mimir_arena, total);
+    if (result == NULL) {
+        return NULL;
+    }
+
+    size_t cursor = 0;
+
+    for (size_t i = 0; i < a_len; i += 1) {
+        result[cursor++] = a[i];
+    }
+
+    result[cursor++] = '.';
+
+    for (size_t i = 0; i < b_len; i += 1) {
+        result[cursor++] = b[i];
+    }
+
+    result[cursor++] = '.';
+
+    for (size_t i = 0; i < c_len; i += 1) {
+        result[cursor++] = c[i];
+    }
+
+    result[cursor] = '\0';
+
+    return result;
+}
+```
+
+---
+
+## 10. Builder для source
+
+Пока тупо switch/if по имени. Registry можно потом.
+
+```c
+static int mimir_build_source(
+    struct mimir_policy_ini *ini,
+    char *source_name,
+    char *section,
+    struct mimir_policy_source *source
+) {
+    if (mimir_cstring_equals(source_name, "fs")) {
+        return mimir_build_source_fs(ini, section, source);
+    }
+
+    mimir_error("Unknown source");
+    return -1;
+}
+```
+
+---
+
+## 11. FS source config
+
+```c
+struct mimir_policy_source_fs_config {
+    char *path;
+};
+```
+
+```c
+static int mimir_build_source_fs(
+    struct mimir_policy_ini *ini,
+    char *section,
+    struct mimir_policy_source *source
+) {
+    struct mimir_policy_source_fs_config *config = mimir_arena_malloc(
+        &g_mimir_arena,
+        sizeof(*config)
+    );
+
+    if (config == NULL) {
+        mimir_error("Failed to allocate fs source config");
+        return -1;
+    }
+
+    for (size_t i = 0; i < ini->entries_count; i += 1) {
+        struct mimir_policy_entry *entry = ini->entries + i;
+
+        if (!mimir_cstring_equals(entry->section, section)) {
+            continue;
+        }
+
+        if (mimir_cstring_equals(entry->key, "path")) {
+            config->path = entry->value;
+            continue;
+        }
+
+        mimir_error("Unknown fs source key");
+        return -1;
+    }
+
+    if (config->path == NULL) {
+        mimir_error("fs source path is missing");
+        return -1;
+    }
+
+    source->type = MIMIR_POLICY_SOURCE_TYPE_FILE_SYSTEM;
+    source->config = config;
+    source->vtable = &mimir_policy_source_fs_vtable;
+
+    return 0;
+}
+```
+
+---
+
+## 12. Repository builder
+
+```c
+static int mimir_build_repository(
+    struct mimir_policy_ini *ini,
+    char *repository_name,
+    char *section,
+    struct mimir_policy_repository *repository
+) {
+    if (mimir_cstring_equals(repository_name, "fs")) {
+        return mimir_build_repository_fs(ini, section, repository);
+    }
+
+    mimir_error("Unknown repository");
+    return -1;
+}
+```
+
+```c
+struct mimir_policy_repository_fs_config {
+    char *path;
+};
+```
+
+```c
+static int mimir_build_repository_fs(
+    struct mimir_policy_ini *ini,
+    char *section,
+    struct mimir_policy_repository *repository
+) {
+    struct mimir_policy_repository_fs_config *config = mimir_arena_malloc(
+        &g_mimir_arena,
+        sizeof(*config)
+    );
+
+    if (config == NULL) {
+        mimir_error("Failed to allocate fs repository config");
+        return -1;
+    }
+
+    for (size_t i = 0; i < ini->entries_count; i += 1) {
+        struct mimir_policy_entry *entry = ini->entries + i;
+
+        if (!mimir_cstring_equals(entry->section, section)) {
+            continue;
+        }
+
+        if (mimir_cstring_equals(entry->key, "path")) {
+            config->path = entry->value;
+            continue;
+        }
+
+        mimir_error("Unknown fs repository key");
+        return -1;
+    }
+
+    if (config->path == NULL) {
+        mimir_error("fs repository path is missing");
+        return -1;
+    }
+
+    repository->type = MIMIR_POLICY_REPOSITORY_TYPE_FILE_SYSTEM;
+    repository->config = config;
+    repository->vtable = &mimir_policy_repository_fs_vtable;
+
+    return 0;
+}
+```
+
+---
+
+## 13. Driver builder
+
+```c
+static int mimir_build_driver(
+    struct mimir_policy_ini *ini,
+    char *driver_name,
+    char *section,
+    struct mimir_policy_driver *driver
+) {
+    if (mimir_cstring_equals(driver_name, "rsync")) {
+        return mimir_build_driver_rsync(ini, section, driver);
+    }
+
+    mimir_error("Unknown driver");
+    return -1;
+}
+```
+
+```c
+struct mimir_policy_driver_rsync_config {
+    int archive;
+    int delete;
+    int hardlinks;
+    int acl;
+    int xattrs;
+    int numeric_ids;
+};
+```
+
+---
+
+## 14. Rsync builder
+
+```c
+static int mimir_build_driver_rsync(
+    struct mimir_policy_ini *ini,
+    char *section,
+    struct mimir_policy_driver *driver
+) {
+    struct mimir_policy_driver_rsync_config *config = mimir_arena_malloc(
+        &g_mimir_arena,
+        sizeof(*config)
+    );
+
+    if (config == NULL) {
+        mimir_error("Failed to allocate rsync driver config");
+        return -1;
+    }
+
+    for (size_t i = 0; i < ini->entries_count; i += 1) {
+        struct mimir_policy_entry *entry = ini->entries + i;
+
+        if (!mimir_cstring_equals(entry->section, section)) {
+            continue;
+        }
+
+        if (mimir_cstring_equals(entry->key, "archive")) {
+            if (mimir_parse_bool(entry->value, &config->archive) != 0) {
+                return -1;
+            }
+
+            continue;
+        }
+
+        if (mimir_cstring_equals(entry->key, "delete")) {
+            if (mimir_parse_bool(entry->value, &config->delete) != 0) {
+                return -1;
+            }
+
+            continue;
+        }
+
+        if (mimir_cstring_equals(entry->key, "hardlinks")) {
+            if (mimir_parse_bool(entry->value, &config->hardlinks) != 0) {
+                return -1;
+            }
+
+            continue;
+        }
+
+        if (mimir_cstring_equals(entry->key, "acl")) {
+            if (mimir_parse_bool(entry->value, &config->acl) != 0) {
+                return -1;
+            }
+
+            continue;
+        }
+
+        if (mimir_cstring_equals(entry->key, "xattrs")) {
+            if (mimir_parse_bool(entry->value, &config->xattrs) != 0) {
+                return -1;
+            }
+
+            continue;
+        }
+
+        if (mimir_cstring_equals(entry->key, "numeric_ids")) {
+            if (mimir_parse_bool(entry->value, &config->numeric_ids) != 0) {
+                return -1;
+            }
+
+            continue;
+        }
+
+        mimir_error("Unknown rsync driver key");
+        return -1;
+    }
+
+    driver->type = MIMIR_POLICY_DRIVER_RSYNC;
+    driver->config = config;
+    driver->vtable = &mimir_policy_driver_rsync_vtable;
+
+    return 0;
+}
+```
+
+---
+
+## 15. Главное: hash map пока не нужен
+
+Вот это:
+
+```c
+// 1. Create domain temporary structure (hash-map)
+// 1.1. O(1) access to every hm[section][key] = value
+```
+
+Я бы отложил.
+
+Сейчас тебе нужен не hash map, а функции:
+
+```c
+mimir_read_policy_manifest()
+mimir_build_source()
+mimir_build_capture()
+mimir_build_repository()
+mimir_build_driver()
+```
+
+Потом внутри них можно заменить:
+
+```c
+for (size_t i = 0; i < ini->entries_count; i += 1)
+```
+
+на:
+
+```c
+mimir_ini_get(ini_map, section, key)
+```
+
+Но архитектура не изменится.
+
+---
+
+## Какой следующий минимальный шаг
+
+Я бы сделал вот это:
+
+```c
+struct mimir_policy {
+    char *title;
+
+    struct mimir_policy_source source;
+    struct mimir_policy_repository repository;
+    struct mimir_policy_driver driver;
+};
+```
+
+Без capture пока.
+
+И конфиг:
+
+```ini
+[attachments]
+source = fs
+repository = fs
+driver = rsync
+
+[attachments.source.fs]
+path = /tmp/attachments
+
+[attachments.repository.fs]
+path = /tmp/attachmes
+
+[attachments.driver.rsync]
+archive = true
+delete = true
+```
+
+А `capture` добавишь следующим шагом:
+
+```ini
+capture = direct
+
+[attachments.capture.direct]
+```
+
+Так ты не застрянешь в архитектуре, но уже будешь двигаться в правильную сторону.
