@@ -3,7 +3,7 @@
  * Email: iwantknow.aboutjt68h43@gmail.com
  * File: mimir_policy_parser.c
  * Created: 2026-06-16 02:48:16
- * Last updated: 2026-06-21 04:15:51
+ * Last updated: 2026-06-25 03:03:45
  * Description:
  * License: $LICENSE
  */
@@ -14,9 +14,16 @@ struct mimir_policy_entry {
     char *value;
 };
 
+struct mimir_policy_index {
+    char *full_key;
+    size_t entry_index;
+};
+
 struct mimir_policy_ini {
     struct mimir_policy_entry *entries;
     size_t entries_count, sections_count;
+
+    struct mimir_policy_index *index;
 };
 
 static int mimir_parse_next_line(struct mimir_slice *content, struct mimir_slice *line) {
@@ -153,7 +160,52 @@ static int mimir_parse_section(struct mimir_slice line, struct mimir_slice *sect
     return 0;
 }
 
-int mimir_parse_policy_content(char* policy_content, size_t policy_content_size, struct mimir_policy_ini *policy_ini) {
+static int mimir_policy_index_cmp(const void *a, const void *b) {
+    const struct mimir_policy_index *ia = a;
+    const struct mimir_policy_index *ib = b;
+
+    return strcmp(ia->full_key, ib->full_key);
+}
+
+static int mimir_policy_build_index(struct mimir_policy_ini *ini) {
+    ini->index = mimir_arena_malloc(&g_mimir_arena, sizeof(*ini->index) * ini->entries_count);
+
+    if (ini->index == NULL) {
+        mimir_error("Failed to allocate policy index");
+        return -1;
+    }
+
+    for (size_t i = 0; i < ini->entries_count; i++) {
+        struct mimir_policy_entry *entry = &ini->entries[i];
+
+        size_t section_len = strlen(entry->section);
+        size_t key_len = strlen(entry->key);
+
+        char *full_key = mimir_arena_malloc(
+            &g_mimir_arena,
+            section_len + 1 + key_len + 1
+        );
+
+        if (full_key == NULL) {
+            mimir_error("Failed to allocate full key");
+            return -1;
+        }
+
+        memcpy(full_key, entry->section, section_len);
+        full_key[section_len] = '.';
+        memcpy(full_key + section_len + 1, entry->key, key_len);
+        full_key[section_len + 1 + key_len] = '\0';
+
+        ini->index[i].full_key = full_key;
+        ini->index[i].entry_index = i;
+    }
+
+    qsort(ini->index, ini->entries_count, sizeof(*ini->index), mimir_policy_index_cmp);
+
+    return 0;
+}
+
+int mimir_policy_parse_content(char* policy_content, size_t policy_content_size, struct mimir_policy_ini *policy_ini) {
     struct mimir_slice content = {
         .start = policy_content,
         .end = policy_content + policy_content_size
@@ -259,6 +311,12 @@ int mimir_parse_policy_content(char* policy_content, size_t policy_content_size,
             entries_iterator += 1;
             continue;
         }
+    }
+
+    int success = mimir_policy_build_index(policy_ini);
+    if (success != 0) {
+        mimir_error("Failed to build policy index");
+        return -1;
     }
 
     return 0;

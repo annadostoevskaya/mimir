@@ -3,7 +3,7 @@
  * Email: iwantknow.aboutjt68h43@gmail.com
  * File: linux_mimira.c
  * Created: 2026-06-16 02:46:12
- * Last updated: 2026-06-23 09:24:06
+ * Last updated: 2026-06-25 03:03:22
  * Description:
  * License: $LICENSE
  */
@@ -84,10 +84,10 @@ static char *mimir_slice_to_cstring(struct mimir_slice src) {
     return dest;
 }
 
-static void mimir_print_slice(int fd, struct mimir_slice s) {
-    write(fd, s.start, s.end - s.start);
-    write(fd, "\n", 1);
-}
+// static void mimir_print_slice(int fd, struct mimir_slice s) {
+//     write(fd, s.start, s.end - s.start);
+//     write(fd, "\n", 1);
+// }
 
 /* END: mimir_slice.c */
 
@@ -115,49 +115,15 @@ enum mimir_policy_driver_type {
     MIMIR_POLICY_DRIVER_COUNT
 };
 
-enum mimir_policy_artifact_type {
-    MIMIR_ARTIFACT_NONE = 0,
-    MIMIR_ARTIFACT_FS_PATH ,
-    MIMIR_ARTIFACT_STREAM,
-    MIMIR_ARTIFACT_BLOCK_DEVICE,
-
-    MIMIR_ARTIFACT_COUNT
-};
-
-struct mimir_policy_artifact {
-    enum mimir_policy_artifact_type type;
-
-    union {
-        struct {
-            char *path;
-        } fs;
-
-        struct {
-            int fd;
-        } stream;
-
-        struct {
-            char *path;
-        } block_device;
-    };
-};
-
-struct mimir_policy_source {
-    enum mimir_policy_source_type type;
-    void *config;
-    const struct mimir_policy_source_vtable *vtable;
-};
-
 struct mimir_policy {
     char *title;
 
-    struct mimir_policy_source source;
-    // struct mimir_policy_capture capture;
-    struct mimir_policy_repo repo;
-    struct mimir_policy_driver driver;
+    // struct mimir_policy_source source;
+    // struct mimir_policy_repo repo;
+    // struct mimir_policy_driver driver;
 };
 
-static int mimir_build_policies(struct mimir_policy_ini *policy_ini, struct mimir_policy **policies) {
+// static int mimir_build_policies(struct mimir_policy_ini *policy_ini, struct mimir_policy **policies) {
 
     // BUILD POLICY
     // 1. Create domain temporary structure (hash-map)
@@ -171,8 +137,8 @@ static int mimir_build_policies(struct mimir_policy_ini *policy_ini, struct mimi
     // 4. build one policy
     // 5.
 
-    return 0;
-}
+//     return 0;
+// }
 
 int main(int argc, char **argv) {
     g_mimir_arena = mimir_arena_initialize(8192);
@@ -185,21 +151,24 @@ int main(int argc, char **argv) {
     char *filepath = argv[1]; // TODO: Validation
     char *policy_content = NULL;
     size_t policy_content_size = 0;
-    int success = mimir_load_policy_content(filepath, &policy_content, &policy_content_size);
+    int success = mimir_policy_load_content(filepath, &policy_content, &policy_content_size);
     if (success != 0) {
         mimir_error("Failed to load backup policy");
         return -1;
     }
 
     struct mimir_policy_ini ini = { 0 };
-    success = mimir_parse_policy_content(policy_content, policy_content_size, &ini);
+    success = mimir_policy_parse_content(policy_content, policy_content_size, &ini);
     if (success != 0) {
         mimir_error("Failed to parse backup policy");
         return -1;
     }
 
-    struct mimir_policy *policies = NULL;
-    success = mimir_build_policies(ini, &policies);
+    // struct mimir_policy *policies = NULL;
+    // success = mimir_policy_discover(&ini, &policies);
+    // success = mimir_policy_build(&ini, &policies);
+    // struct mimir_policy *policies = NULL;
+    // success = mimir_build_policies(ini, &policies);
     if (success != 0) {
         mimir_error("Failed to build policies (mimir_build_policies)");
         return -1;

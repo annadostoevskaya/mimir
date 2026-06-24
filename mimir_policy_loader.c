@@ -3,12 +3,12 @@
  * Email: iwantknow.aboutjt68h43@gmail.com
  * File: mimir_policy_loader.c
  * Created: 2026-06-19 00:51:52
- * Last updated: 2026-06-21 21:36:53
+ * Last updated: 2026-06-25 02:13:53
  * Description:
  * License: $LICENSE
  */
 
-static int mimir_load_policy_content(char *path, char **policy_content, size_t *policy_content_size) {
+static int mimir_policy_load_content(char *path, char **policy_content, size_t *policy_content_size) {
     int policy_fd = 0;
     struct stat policy_stat = {};
 
