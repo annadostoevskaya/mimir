@@ -3,7 +3,7 @@
  * Email: iwantknow.aboutjt68h43@gmail.com
  * File: linux_mimira.c
  * Created: 2026-06-16 02:46:12
- * Last updated: 2026-06-26 06:42:00
+ * Last updated: 2026-06-26 08:58:39
  * Description:
  * License: $LICENSE
  */
@@ -123,11 +123,15 @@ struct mimir_policy {
     // struct mimir_policy_driver driver;
 };
 
-static int mimir_is_root_policy(const char* section) {
+static int mimir_match_root_policy_section(const char *section, size_t *section_size) {
+    *section_size = 1;
+
     for (const char *c = section; *c != '\0'; c += 1) {
         if (*c == '.') {
             return 0;
         }
+
+        *section_size += 1;
     }
 
     return 1;
@@ -150,7 +154,8 @@ static int mimir_build_policies(struct mimir_policy_ini *policy_ini, struct mimi
     char **roots = NULL;
     size_t roots_count = 0;
     for (size_t i = 0; i < policy_ini->sections_count; i += 1) {
-        if (mimir_is_root_policy(policy_ini->sections[i])) {
+        size_t section_size = 0;
+        if (mimir_match_root_policy_section(policy_ini->sections[i], &section_size)) {
             roots_count += 1;
         }
     }
@@ -169,8 +174,9 @@ static int mimir_build_policies(struct mimir_policy_ini *policy_ini, struct mimi
     // TODO: Deduplication for roots
     size_t roots_iterator = 0;
     for (size_t i = 0; i < policy_ini->sections_count; i += 1) {
-        if (mimir_is_root_policy(policy_ini->sections[i])) {
-            roots[roots_iterator] = mimir_arena_malloc(&g_mimir_arena, strlen(policy_ini->sections[i]) + 1);
+        size_t section_size = 0;
+        if (mimir_match_root_policy_section(policy_ini->sections[i], &section_size)) {
+            roots[roots_iterator] = mimir_arena_malloc(&g_mimir_arena, section_size);
             if (roots[roots_iterator] == NULL) {
                 mimir_error("Failed to allocate memory for root policies");
                 return -1;
