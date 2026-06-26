@@ -3,7 +3,7 @@
  * Email: iwantknow.aboutjt68h43@gmail.com
  * File: mimir_arena.c
  * Created: 2026-06-16 02:46:12
- * Last updated: 2026-06-16 02:56:49
+ * Last updated: 2026-06-26 06:36:24
  * Description:
  * License: $LICENSE
  */
@@ -31,6 +31,11 @@ struct mimir_arena_allocator mimir_arena_initialize(size_t size) {
 
 void *mimir_arena_malloc(struct mimir_arena_allocator *arena, size_t size) {
     void *memory;
+
+    if (size == 0) {
+        mimir_error("Failed to allocate memory from mimir_arena, request size is 0 (mimir_arena_malloc)");
+        return NULL;
+    }
 
     if (size > arena->size - arena->cursor) {
         mimir_error("Failed to allocate memory from mimir_arena, not enough memory (mimir_arena_malloc)");

@@ -3,7 +3,7 @@
  * Email: iwantknow.aboutjt68h43@gmail.com
  * File: linux_mimira.c
  * Created: 2026-06-16 02:46:12
- * Last updated: 2026-06-25 03:03:22
+ * Last updated: 2026-06-26 06:42:00
  * Description:
  * License: $LICENSE
  */
@@ -123,7 +123,17 @@ struct mimir_policy {
     // struct mimir_policy_driver driver;
 };
 
-// static int mimir_build_policies(struct mimir_policy_ini *policy_ini, struct mimir_policy **policies) {
+static int mimir_is_root_policy(const char* section) {
+    for (const char *c = section; *c != '\0'; c += 1) {
+        if (*c == '.') {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int mimir_build_policies(struct mimir_policy_ini *policy_ini, struct mimir_policy **policies) {
 
     // BUILD POLICY
     // 1. Create domain temporary structure (hash-map)
@@ -137,8 +147,51 @@ struct mimir_policy {
     // 4. build one policy
     // 5.
 
-//     return 0;
-// }
+    char **roots = NULL;
+    size_t roots_count = 0;
+    for (size_t i = 0; i < policy_ini->sections_count; i += 1) {
+        if (mimir_is_root_policy(policy_ini->sections[i])) {
+            roots_count += 1;
+        }
+    }
+
+    if (roots_count == 0) {
+        mimir_error("Policies Not Found");
+        return -1;
+    }
+
+    roots = mimir_arena_malloc(&g_mimir_arena, sizeof(*roots) * roots_count);
+    if (roots == NULL) {
+        mimir_error("Failed to allocate memory for root policies");
+        return -1;
+    }
+
+    // TODO: Deduplication for roots
+    size_t roots_iterator = 0;
+    for (size_t i = 0; i < policy_ini->sections_count; i += 1) {
+        if (mimir_is_root_policy(policy_ini->sections[i])) {
+            roots[roots_iterator] = mimir_arena_malloc(&g_mimir_arena, strlen(policy_ini->sections[i]) + 1);
+            if (roots[roots_iterator] == NULL) {
+                mimir_error("Failed to allocate memory for root policies");
+                return -1;
+            }
+
+            strcpy(roots[roots_iterator], policy_ini->sections[i]);
+            roots_iterator += 1;
+        }
+    }
+
+#define DEBUG_CODE(code) code
+
+    DEBUG_CODE(if (roots_iterator != roots_count) {
+            // *(char*)0x0 = 1;
+            mimir_error("DEBUG_CODE: Error");
+        });
+
+    // search keys for roots[1] or for roots[0] and use it for build tree, u know
+
+    return 0;
+}
 
 int main(int argc, char **argv) {
     g_mimir_arena = mimir_arena_initialize(8192);
@@ -164,11 +217,8 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    // struct mimir_policy *policies = NULL;
-    // success = mimir_policy_discover(&ini, &policies);
-    // success = mimir_policy_build(&ini, &policies);
-    // struct mimir_policy *policies = NULL;
-    // success = mimir_build_policies(ini, &policies);
+    struct mimir_policy *policies = NULL;
+    success = mimir_build_policies(&ini, &policies);
     if (success != 0) {
         mimir_error("Failed to build policies (mimir_build_policies)");
         return -1;

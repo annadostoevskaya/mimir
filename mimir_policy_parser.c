@@ -3,7 +3,7 @@
  * Email: iwantknow.aboutjt68h43@gmail.com
  * File: mimir_policy_parser.c
  * Created: 2026-06-16 02:48:16
- * Last updated: 2026-06-25 03:03:45
+ * Last updated: 2026-06-26 06:32:23
  * Description:
  * License: $LICENSE
  */
@@ -21,6 +21,7 @@ struct mimir_policy_index {
 
 struct mimir_policy_ini {
     struct mimir_policy_entry *entries;
+    char **sections;
     size_t entries_count, sections_count;
 
     struct mimir_policy_index *index;
@@ -271,13 +272,15 @@ int mimir_policy_parse_content(char* policy_content, size_t policy_content_size,
     }
 
     policy_ini->entries = (struct mimir_policy_entry*)mimir_arena_malloc(&g_mimir_arena, sizeof(*policy_ini->entries) * policy_ini->entries_count);
+    policy_ini->sections = (char**)mimir_arena_malloc(&g_mimir_arena, sizeof(*policy_ini->sections) * policy_ini->sections_count);
 
-    if (policy_ini->entries == NULL) {
-        mimir_error("Failed to allocate memory for policy entries");
+    if (policy_ini->entries == NULL || policy_ini->sections == NULL) {
+        mimir_error("Failed to allocate memory for policy entries or sections");
         return -1;
     }
 
     size_t entries_iterator = 0;
+    size_t sections_iterator = 0;
 
     while (mimir_parse_next_line(&content, &line)) {
         struct mimir_slice trimmed_line = mimir_parse_trim_line(line);
@@ -287,7 +290,15 @@ int mimir_policy_parse_content(char* policy_content, size_t policy_content_size,
         }
 
         if (*trimmed_line.start == '[') {
-            mimir_parse_section(trimmed_line, &current_section);
+            int success = mimir_parse_section(trimmed_line, &current_section);
+            if (success != 0) {
+                mimir_error("Failed to parse section (mimir_parse_section)");
+                return -1;
+            }
+
+            policy_ini->sections[sections_iterator] = mimir_slice_to_cstring(current_section);
+            sections_iterator += 1; // FIXME: Boundary checks
+
             continue;
         }
 
@@ -295,7 +306,11 @@ int mimir_policy_parse_content(char* policy_content, size_t policy_content_size,
         if (mimir_parse_is_alpha_numeric(*c)) {
             struct mimir_slice key = {};
             struct mimir_slice value = {};
-            mimir_parse_key_value(trimmed_line, &key, &value);
+            int success = mimir_parse_key_value(trimmed_line, &key, &value);
+            if (success != 0) {
+                mimir_error("Failed to parse key-value (mimir_parse_key_value)");
+                return -1;
+            }
 
             struct mimir_policy_entry *entry = policy_ini->entries + entries_iterator;
 
@@ -311,6 +326,9 @@ int mimir_policy_parse_content(char* policy_content, size_t policy_content_size,
             entries_iterator += 1;
             continue;
         }
+
+        mimir_error("Unexpected token error");
+        return -1;
     }
 
     int success = mimir_policy_build_index(policy_ini);
