@@ -1,198 +1,81 @@
 Mimir
-
-Cloud-Native Backup Orchestrator
-
-Mimir is a cloud-native backup orchestration platform built around ephemeral workers, declarative policies, and object storage.
-
-Instead of running permanent backup agents on every system, Mimir orchestrates short-lived workers that execute backup jobs on demand, transfer data to object storage, and terminate when finished.
-
-Vision
-
-Modern infrastructure has Kubernetes clusters, virtual machines, databases, network storage, and object storage. Existing backup solutions typically fall into one of two categories:
-
-- Enterprise platforms with permanent agents and complex infrastructure
-- Backup tools that provide storage and deduplication but lack orchestration
-
-Mimir fills the gap between them.
-
-It provides a control plane for backups while delegating data movement to ephemeral workers.
-
-Architecture
-
-BackupPolicy
-      ↓
-Backup Controller
-      ↓
-Job Scheduler
-      ↓
-Ephemeral Worker
-      ↓
-Snapshot / Read-Only Mount
-      ↓
-Restic / Kopia
-      ↓
-S3-Compatible Storage
-
-Control Plane
-
-The control plane is responsible for:
-
-- Backup policies
-- Scheduling
-- Job lifecycle management
-- Retention policies
-- Monitoring and reporting
-- Restore orchestration
-
-The control plane never handles backup data directly.
-
-Data Plane
-
-The data plane consists of ephemeral workers.
-
-A worker:
-
-1. Receives a backup job
-2. Attaches a snapshot or mounts a source volume in read-only mode
-3. Executes a backup using Restic or Kopia
-4. Uploads data to object storage
-5. Reports status
-6. Terminates
-
-No permanent agents are required.
-
-Core Principles
-
-Declarative
-
-Backups are described as desired state.
-
-apiVersion: mimir.io/v1alpha1
-kind: BackupPolicy
-
-metadata:
-  name: billing-db
-
-spec:
-  source:
-    type: postgres
-
-  schedule: "0 * * * *"
-
-  destination:
-    bucket: production-backups
-
-  retention:
-    hourly: 48
-    daily: 30
-
-Ephemeral Execution
-
-Workers are created only when needed.
-
-Create Job
-    ↓
-Run Backup
-    ↓
-Upload Data
-    ↓
-Destroy Worker
-
-This minimizes resource consumption and reduces operational overhead.
-
-Stateless Data Plane
-
-Workers do not maintain state.
-
-All metadata is stored by the controller and all backup data is stored in object storage.
-
-S3-Native
-
-Mimir treats object storage as the primary backup destination.
-
-Supported targets include:
-
-- Amazon S3
-- Cloudflare R2
-- Backblaze B2
-- MinIO
-- Storj
-- Any S3-compatible implementation
-
-Supported Sources
-
-Filesystems
-
-- Local disks
-- Network shares
-- NFS
-- SMB
-
-Kubernetes
-
-- Persistent Volumes
-- CSI VolumeSnapshots
-- Namespace-level backups
-
-Databases
-
-- PostgreSQL
-- MySQL
-- MariaDB
-- MongoDB
-
-Virtual Machines
-
-- VM snapshots
-- Block storage volumes
-
-Why Mimir
-
-Traditional Backup Platforms| Mimir
-Permanent agents| Ephemeral workers
-Heavy infrastructure| Kubernetes-native
-Complex deployment| Declarative configuration
-Vendor lock-in| Open standards
-Storage-specific workflows| S3-first architecture
-
-Roadmap
-
-Phase 1
-
-- BackupPolicy CRD
-- BackupJob CRD
-- Kubernetes Operator
-- Restic integration
-- S3 support
-- Basic monitoring
-
-Phase 2
-
-- Kopia support
-- Restore workflows
-- Retention automation
-- Multi-cluster support
-
-Phase 3
-
-- Web UI
-- RBAC
-- Multi-tenant architecture
-- Backup analytics
-- Disaster recovery workflows
-
-Non-Goals
-
-Mimir is not:
-
-- A backup engine
-- A storage system
-- A deduplication engine
-
-Mimir orchestrates existing backup tools and infrastructure.
-
-Name
-
-In Norse mythology, Mimir is the keeper of wisdom and memory.
-
-Just as Mimir preserves knowledge, the platform preserves the memory of your infrastructure.
+=====
+
+Lightweight, modular backup engine and orchestrator written in C for Linux.
+
+Overview
+--------
+Mimir is designed as a fast, low-overhead backup tool and orchestrator. It prioritizes zero external runtime dependencies, explicit memory management using an arena allocator, high-performance zero-copy string slicing, and declarative hierarchical configuration policies.
+
+For the overarching long-term vision and cloud-native architecture concept, see CONCEPT.txt.
+
+Architecture & Current Design
+-----------------------------
+
+1. Core Engine & Memory Architecture
+   - Low-Level POSIX Foundation: Built using direct Linux system calls (mmap, munmap, open, read, write, fstat) without bulky dependencies.
+   - Arena Memory Allocator (mimir_arena.c): Linear memory allocator powered by mmap. Guarantees predictable memory consumption, zero heap fragmentation, fast O(1) allocations, and safe bulk deallocation.
+   - Zero-Copy Slicing (struct mimir_slice): String parsing and inspection operate directly on pointer ranges [start, end) without early allocations or in-place buffer mutations.
+
+2. Declarative Policy Configuration
+   - Hierarchical INI Policies (policy.ini): Backups are expressed through declarative manifests with hierarchical scoped sections:
+     * Root manifests: [policy_name] specifying source, capture, repository, and driver types.
+     * Scoped component configurations: [policy_name.component.implementation] providing target-specific options (e.g. [attachments.source.fs], [attachments.driver.rsync]).
+   - Fast Indexing & Parsing (mimir_policy_parser.c):
+     * Lexer/parser handles section headers, key-value extraction, inline comments (;), and character validation.
+     * Builds a flattened sorted index table (mimir_policy_index) for fast lookups and hierarchical policy reconstruction.
+
+3. Modular Backup Pipeline (In Progress)
+   - Decoupled Pipeline Stages:
+       source -> capture (artifact) -> driver -> repository
+     * source: Data origins (local filesystem, databases, snapshots).
+     * capture: Preparation and snapshotting (direct mounts, LVM/CSI snapshots).
+     * driver: Data movement engine (rsync, with planned support for restic, kopia).
+     * repository: Destination storage (local/network filesystem, object storage).
+
+Current Implementation Status
+-----------------------------
+- [x] POSIX syscall abstractions and basic error logging
+- [x] Dynamic arena allocator with mmap/munmap (mimir_arena.c)
+- [x] Policy file loader reading into memory buffers (mimir_policy_loader.c)
+- [x] Tokenizer, parser, and validator for hierarchical INI policy files (mimir_policy_parser.c)
+- [x] Policy index table generation with qsort-based sorting (mimir_policy_parser.c)
+- [x] Extraction and parsing of root policy manifests (linux_mimir.c)
+- [ ] Complete policy tree object construction from index
+- [ ] Driver vtable and execution engine (rsync driver implementation)
+- [ ] Capture mechanics and multi-source abstractions
+
+Project Structure
+-----------------
+- linux_mimir.c          : Main program entry point, slices, memory glue, policy builder
+- mimir_arena.c          : Custom mmap-based arena memory allocator
+- mimir_memory.c         : Memory abstraction stubs
+- mimir_policy_loader.c  : File loader reading policy files into the memory arena
+- mimir_policy_parser.c  : Lexer, parser, syntax validator, and index builder for INI policies
+- policy.ini             : Sample declarative backup policy definition
+- Makefile               : Build recipes
+- CONCEPT.txt            : High-level vision and cloud-native orchestrator architecture concept
+- TODO                   : Design documentation, architectural notes, and task tracker
+- HELP                   : Development environment and editor reference cheat sheet
+
+Building and Running
+--------------------
+
+Prerequisites:
+- Linux environment
+- GCC or Clang
+- Make
+
+Build:
+  make
+
+Run:
+  ./a.out policy.ini
+
+Clean:
+  make clean
+
+Author & Contact
+----------------
+Author: Anna Dostoevskaya (Temirbek Rakhimgalyiev)
+Email: iwantknow.aboutjt68h43@gmail.com
